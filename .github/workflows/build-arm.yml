@@ -1,0 +1,90 @@
+name: Build Intel Binary for Testing
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-intel:
+    runs-on: macos-13  # Intel runner
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    
+    - name: Download and extract pre-built Piper binaries (Intel)
+      run: |
+        # Download Intel version
+        curl -L "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_macos_x64.tar.gz" -o piper_macos_x64.tar.gz
+        
+        # Extract the binaries
+        tar -xzf piper_macos_x64.tar.gz
+        
+        # List contents
+        ls -la piper/
+        
+    - name: Set up Python environment with extracted piper_phonemize
+      run: |
+        python -m pip install --upgrade pip
+        pip install wheel setuptools
+        
+        # Create a local site-packages directory
+        mkdir -p local_packages
+        
+        # Copy piper_phonemize from extracted binaries
+        if [ -d "piper/lib/python*/site-packages/piper_phonemize" ]; then
+          cp -r piper/lib/python*/site-packages/piper_phonemize local_packages/
+        elif [ -d "piper/piper_phonemize" ]; then
+          cp -r piper/piper_phonemize local_packages/
+        fi
+        
+        # Add local packages to Python path
+        echo "$(pwd)/local_packages" > $(python -c "import site; print(site.getsitepackages()[0])")/local_packages.pth
+        
+    - name: Install remaining dependencies
+      run: |
+        pip install numpy torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install onnxruntime
+        pip install pyinstaller
+        pip install --no-deps piper-tts==1.2.0 || echo "piper-tts install failed, continuing..."
+        
+    - name: Find espeak-ng-data path
+      id: espeak-path
+      run: |
+        ESPEAK_PATH=""
+        if [ -d "piper/espeak-ng-data" ]; then
+          ESPEAK_PATH="$(pwd)/piper/espeak-ng-data"
+        elif [ -d "piper/lib/espeak-ng-data" ]; then
+          ESPEAK_PATH="$(pwd)/piper/lib/espeak-ng-data"
+        else
+          ESPEAK_PATH=$(find piper/ -name "espeak-ng-data" -type d | head -1)
+          if [ -n "$ESPEAK_PATH" ]; then
+            ESPEAK_PATH="$(pwd)/$ESPEAK_PATH"
+          fi
+        fi
+        
+        if [ -z "$ESPEAK_PATH" ]; then
+          brew install espeak-ng
+          ESPEAK_PATH="/opt/homebrew/share/espeak-ng-data"
+        fi
+        
+        echo "path=$ESPEAK_PATH" >> $GITHUB_OUTPUT
+        
+    - name: Build Intel binary
+      run: |
+        pyinstaller \
+          --add-data "piper:piper" \
+          --add-data "local_packages:." \
+          --add-data "${{ steps.espeak-path.outputs.path }}:espeak-ng-data" \
+          --onefile \
+          --name piper-intel \
+          piper_main.py
+          
+    - name: Upload Intel binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: piper-intel-binary
+        path: dist/piper-intel
